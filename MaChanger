@@ -1,87 +1,357 @@
 #!/bin/bash
 
-INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
-IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+# ============================================
+# Enhanced MaChanger
+# By QU73N (Enhanced Version)
+# Features: Validation, Logging, Persistence, More Options
+# ============================================
+
+trap 'echo -e "\n${RED}[!] Interrupted. Exiting...${NC}"; exit 1' INT
+
 RED='\e[31m'
 GREEN='\e[32m'
 BOLD_YELLOW='\e[1;33m'
 CYAN='\e[36m'
+BLUE='\e[34m'
+MAGENTA='\e[35m'
 NC='\e[0m'
+BOLD='\e[1m'
 
-if [ -z "$INTERFACE" ]; then
-	echo "No default interface found! Using first active interface..."
-	INTERFACE=$(ip -o -4 addr show | awk '{print $2}' | grep -v lo | head -n1)
+LOG_FILE="/tmp/machanger_$(date +%Y%m%d_%H%M%S).log"
+BACKUP_DIR="$HOME/.mac_backups"
+MAC_VENDOR_DB="/usr/share/macchanger/vendor.db"
+VALID_MAC_PATTERN="^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"
 
-	if [-z "$INTERFACE" ]; then
-		echo "No network interfaces found!"
-		exit 1
-	fi
+log_action() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" >> "$LOG_FILE"
+}
+
+show_header() {
+    clear
+    echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD_YELLOW}        🖥️  MaChanger: By QU73N        ${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
+}
+
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v ip &> /dev/null; then
+        missing_deps+=("iproute2")
+    fi
+    
+    if ! command -v macchanger &> /dev/null; then
+        missing_deps+=("macchanger")
+    fi
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo -e "${RED}[!] Missing dependencies:${NC}"
+        for dep in "${missing_deps[@]}"; do
+            echo -e "  - ${CYAN}$dep${NC}"
+        done
+        
+        echo -e "\n${BOLD_YELLOW}[?] Install missing dependencies? (y/n): ${NC}"
+        read -n1 -r install_choice
+        echo
+        
+        if [[ $install_choice =~ ^[Yy]$ ]]; then
+            echo -e "${CYAN}[+] Installing dependencies...${NC}"
+            if command -v apt-get &> /dev/null; then
+                sudo apt-get update && sudo apt-get install -y "${missing_deps[@]}"
+            elif command -v yum &> /dev/null; then
+                sudo yum install -y "${missing_deps[@]}"
+            elif command -v pacman &> /dev/null; then
+                sudo pacman -S --noconfirm "${missing_deps[@]}"
+            else
+                echo -e "${RED}[!] Could not determine package manager${NC}"
+                echo -e "${CYAN}Please install manually: ${missing_deps[*]}${NC}"
+                exit 1
+            fi
+        else
+            echo -e "${RED}[!] Cannot proceed without dependencies${NC}"
+            exit 1
+        fi
+    fi
+    mkdir -p "$BACKUP_DIR"
+}
+
+detect_interfaces() {
+    echo -e "${CYAN}[*] Detecting network interfaces...${NC}"
+    
+    INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+    
+    if [ -z "$INTERFACE" ]; then
+        echo -e "${YELLOW}[!] No default interface found${NC}"
+        INTERFACE=$(ip -o -4 addr show | awk '{print $2}' | grep -v '^lo' | head -n1)
+    fi
+    
+    INTERFACES=($(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo'))
+    
+    if [ ${#INTERFACES[@]} -eq 0 ]; then
+        echo -e "${RED}[!] No network interfaces found!${NC}"
+        exit 1
+    fi
+    
+    if [ -n "$INTERFACE" ]; then
+        IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    fi
+}
+
+validate_mac() {
+    local mac="$1"
+    if [[ $mac =~ $VALID_MAC_PATTERN ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+backup_mac() {
+    local iface="$1"
+    local original_mac=$(ip link show "$iface" | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+    local backup_file="$BACKUP_DIR/${iface}_$(date +%Y%m%d_%H%M%S).backup"
+    
+    echo "Interface: $iface" > "$backup_file"
+    echo "Original MAC: $original_mac" >> "$backup_file"
+    echo "Backup Time: $(date)" >> "$backup_file"
+    
+    log_action "Backed up MAC for $iface: $original_mac"
+    echo -e "${GREEN}[✓] MAC backed up to: $backup_file${NC}"
+}
+
+change_mac() {
+    local iface="$1"
+    local mode="$2"
+    local custom_mac="$3"
+    
+    backup_mac "$iface"
+    
+    echo -e "${CYAN}[*] Bringing interface $iface down...${NC}"
+    sudo ip link set dev "$iface" down 2>/dev/null || {
+        echo -e "${RED}[!] Failed to bring interface down${NC}"
+        return 1
+    }
+    
+    case $mode in
+        "random")
+            echo -e "${GREEN}[+] Setting completely random MAC...${NC}"
+            sudo macchanger -r "$iface"
+            log_action "Set random MAC on $iface"
+            ;;
+        "vendor")
+            echo -e "${GREEN}[+] Setting random MAC (same vendor)...${NC}"
+            sudo macchanger -a "$iface"
+            log_action "Set same-vendor random MAC on $iface"
+            ;;
+        "custom")
+            if validate_mac "$custom_mac"; then
+                echo -e "${GREEN}[+] Setting custom MAC: $custom_mac...${NC}"
+                sudo macchanger -m "$custom_mac" "$iface"
+                log_action "Set custom MAC $custom_mac on $iface"
+            else
+                echo -e "${RED}[!] Invalid MAC address format${NC}"
+                echo -e "${CYAN}Expected format: XX:XX:XX:XX:XX:XX${NC}"
+                return 1
+            fi
+            ;;
+        "reset")
+            echo -e "${GREEN}[+] Resetting to original MAC...${NC}"
+            sudo macchanger -p "$iface"
+            log_action "Reset to original MAC on $iface"
+            ;;
+    esac
+    
+    echo -e "${CYAN}[*] Bringing interface $iface up...${NC}"
+    sudo ip link set dev "$iface" up 2>/dev/null || {
+        echo -e "${RED}[!] Failed to bring interface up${NC}"
+        return 1
+    }
+    
+    echo -e "${CYAN}[*] Waiting for network stabilization...${NC}"
+    sleep 3
+    
+    return 0
+}
+
+show_network_info() {
+    echo -e "${CYAN}══════════════════════════════════════════${NC}"
+    echo -e "${BOLD}Network Information:${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════${NC}"
+    
+    if [ -n "$INTERFACE" ]; then
+        echo -e "${GREEN}Primary Interface:${NC} $INTERFACE"
+        echo -e "${GREEN}IP Address:${NC} ${IP:-${RED}No IP found${NC}}"
+        
+        current_mac=$(ip link show "$INTERFACE" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+        echo -e "${GREEN}Current MAC:${NC} $current_mac"
+        
+        perm_mac=$(sudo macchanger -s "$INTERFACE" 2>/dev/null | grep "Permanent" | awk '{print $3}')
+        if [ -n "$perm_mac" ]; then
+            echo -e "${GREEN}Permanent MAC:${NC} $perm_mac"
+        fi
+    fi
+    
+    echo -e "\n${CYAN}Available Interfaces:${NC}"
+    for iface in "${INTERFACES[@]}"; do
+        status=$(ip link show "$iface" | grep -q "state UP" && echo -e "${GREEN}UP${NC}" || echo -e "${RED}DOWN${NC}")
+        mac=$(ip link show "$iface" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+        echo -e "  ${BOLD_YELLOW}$iface${NC} ($status) - $mac"
+    done
+    echo -e "${CYAN}══════════════════════════════════════════${NC}\n"
+}
+
+restore_backup() {
+    local backups=($(ls "$BACKUP_DIR"/*.backup 2>/dev/null | sort -r))
+    
+    if [ ${#backups[@]} -eq 0 ]; then
+        echo -e "${RED}[!] No backups found${NC}"
+        return
+    fi
+    
+    echo -e "${BOLD_YELLOW}Available Backups:${NC}"
+    for i in "${!backups[@]}"; do
+        echo -e "${GREEN}[$((i+1))]${NC} ${backups[$i]}"
+    done
+    
+    read -p "$(echo -e ${CYAN}"Select backup to restore [1-${#backups[@]}]: "${NC})" backup_choice
+    
+    if [[ $backup_choice =~ ^[0-9]+$ ]] && [ $backup_choice -ge 1 ] && [ $backup_choice -le ${#backups[@]} ]; then
+        local selected_backup="${backups[$((backup_choice-1))]}"
+        local iface=$(grep "Interface:" "$selected_backup" | cut -d' ' -f2)
+        local original_mac=$(grep "Original MAC:" "$selected_backup" | cut -d' ' -f3)
+        
+        echo -e "${CYAN}[+] Restoring $iface to $original_mac...${NC}"
+        change_mac "$iface" "custom" "$original_mac"
+    else
+        echo -e "${RED}[!] Invalid selection${NC}"
+    fi
+}
+
+show_vendor_info() {
+    local mac="$1"
+    local oui=$(echo "$mac" | cut -d: -f1-3 | tr '[:lower:]' '[:upper:]')
+    
+    if [ -f "$MAC_VENDOR_DB" ]; then
+        local vendor=$(grep -i "^$oui" "$MAC_VENDOR_DB" | cut -d' ' -f2-)
+        if [ -n "$vendor" ]; then
+            echo -e "${CYAN}Vendor:${NC} $vendor"
+        else
+            echo -e "${YELLOW}[!] Vendor not found in database${NC}"
+        fi
+    fi
+}
+
+main() {
+    check_dependencies
+    detect_interfaces
+    show_header
+    show_network_info
+    
+    echo -e "${BOLD_YELLOW}Select an option:${NC}"
+    echo -e "${GREEN}[1]${NC} 🎲 Random MAC Address"
+    echo -e "${GREEN}[2]${NC} 🏢 Random MAC (Same Vendor)"
+    echo -e "${GREEN}[3]${NC} ✏️  Set Custom MAC Address"
+    echo -e "${GREEN}[4]${NC} 🔄 Reset to Original MAC"
+    echo -e "${GREEN}[5]${NC} 👁️  Show Current MAC Details"
+    echo -e "${GREEN}[6]${NC} 💾 Restore from Backup"
+    echo -e "${GREEN}[7]${NC} 📊 View Logs"
+    echo -e "${GREEN}[8]${NC} 🔧 Change Interface"
+    echo -e "${GREEN}[0]${NC} 🚪 Exit"
+    echo ""
+    
+    read -p "$(echo -e ${CYAN}"Enter your choice [0-8]: "${NC})" choice
+    
+    case $choice in
+        0)
+            echo -e "\n${RED}[+] Exiting...${NC}"
+            log_action "User exited program"
+            exit 0
+            ;;
+        1)
+            echo -e "${GREEN}[+] Setting random MAC address...${NC}"
+            change_mac "$INTERFACE" "random"
+            ;;
+        2)
+            echo -e "${GREEN}[+] Setting random MAC (Same Vendor)...${NC}"
+            change_mac "$INTERFACE" "vendor"
+            ;;
+        3)
+            read -p "$(echo -e ${GREEN}"Enter MAC Address (XX:XX:XX:XX:XX:XX): "${NC})" new_mac
+            change_mac "$INTERFACE" "custom" "$new_mac"
+            ;;
+        4)
+            echo -e "${GREEN}[+] Resetting to original MAC...${NC}"
+            change_mac "$INTERFACE" "reset"
+            ;;
+        5)
+            echo -e "${GREEN}[+] Current MAC address details:${NC}"
+            sudo macchanger -s "$INTERFACE"
+            current_mac=$(ip link show "$INTERFACE" 2>/dev/null | grep -oE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}' | head -n1)
+            show_vendor_info "$current_mac"
+            ;;
+        6)
+            restore_backup
+            ;;
+        7)
+            if [ -f "$LOG_FILE" ]; then
+                echo -e "${GREEN}[+] Log file contents:${NC}"
+                cat "$LOG_FILE"
+            else
+                echo -e "${RED}[!] No log file found${NC}"
+            fi
+            ;;
+        8)
+            echo -e "${BOLD_YELLOW}Select interface:${NC}"
+            for i in "${!INTERFACES[@]}"; do
+                echo -e "${GREEN}[$((i+1))]${NC} ${INTERFACES[$i]}"
+            done
+            read -p "$(echo -e ${CYAN}"Select interface [1-${#INTERFACES[@]}]: "${NC})" iface_choice
+            
+            if [[ $iface_choice =~ ^[0-9]+$ ]] && [ $iface_choice -ge 1 ] && [ $iface_choice -le ${#INTERFACES[@]} ]; then
+                INTERFACE="${INTERFACES[$((iface_choice-1))]}"
+                IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
+                echo -e "${GREEN}[✓] Changed to interface: $INTERFACE${NC}"
+                main
+            else
+                echo -e "${RED}[!] Invalid selection${NC}"
+            fi
+            ;;
+        *)
+            echo -e "${RED}[!]${NC}${CYAN} Invalid Choice!${NC}"
+            sleep 2
+            main
+            ;;
+    esac
+    
+    echo ""
+    if [[ $choice =~ ^[1-4]$ ]]; then
+        echo -e "${GREEN}[✓] New MAC Address:${NC}"
+        sudo macchanger -s "$INTERFACE" | grep "Current MAC"
+        current_mac=$(sudo macchanger -s "$INTERFACE" 2>/dev/null | grep "Current MAC" | awk '{print $3}')
+        show_vendor_info "$current_mac"
+    fi
+    
+    echo -e "\n${BOLD_YELLOW}══════════════════════════════════════════${NC}"
+    echo -e "${BOLD_YELLOW}            Operation Completed!           ${NC}"
+    echo -e "${BOLD_YELLOW}══════════════════════════════════════════${NC}"
+    echo -e "\n${CYAN}[?] Perform another operation? (y/n): ${NC}"
+    read -n1 -r continue_choice
+    if [[ $continue_choice =~ ^[Yy]$ ]]; then
+        main
+    else
+        echo -e "\n${RED}[+] Exiting...${NC}"
+        log_action "User exited after operations"
+    fi
+}
+
+echo "=== MaChanger Started $(date) ===" > "$LOG_FILE"
+log_action "Script started"
+
+if [ "$EUID" -eq 0 ]; then
+    echo -e "${RED}[!] Warning: Running as root${NC}"
+    echo -e "${CYAN}It's recommended to run as normal user and use sudo${NC}"
+    sleep 2
 fi
 
-clear
-echo -e  "${GREEN}======================================${NC}"
-echo -e  "${BOLD_YELLOW}         MaChanger: By QU73N   ${NC}"
-echo -e  "${GREEN}======================================${NC}"
-echo -e  "${CYAN}YOUR WIFI INTERFACE: ${INTERFACE}${NC}"
-echo -e  "${CYAN}YOUR DEFAULT IP: ${IP:- ${RED}No Ip Found}${NC}"
-echo  ""
-
-echo -e  "${BOLD_YELLOW}Select an options:${NC}"
-echo -e  "${GREEN}[1]${NC} Random MAC Address"
-echo -e  "${GREEN}[2]${NC} Random MAC (Same Vendor)"
-echo -e  "${GREEN}[3]${NC} Set Custom MAC Address"
-echo -e  "${GREEN}[4]${NC} Reset to Original MAC"
-echo -e  "${GREEN}[5]${NC} Show Current MAC"
-echo -e  "${GREEN}[0]${NC} Exit"
-echo  ""
-
-read -p "$(echo -e ${CYAN}"Enter your choice [1-5]: ${NC}")" choice
-
-case $choice in
-	0)
-		echo ""
-		echo -e "${RED}[+] Exiting...${NC}"
-		exit 0
-		;;
-	1)
-		echo -e "${GREEN}[+] Setting random MAC address...${NC}"
-		sudo ip link set dev "$INTERFACE" down
-		sudo macchanger -r "$INTERFACE"
-		sudo ip link set dev "$INTERFACE" up
-		;;
-	2)
-		echo -e "${GREEN}[+] Setting random MAC (Same Vendor)...${NC}"
-		sudo ip link set dev "$INTERFACE" down
-		sudo macchanger -a "$INTERFACE"
-		sudo ip link set dev "$INTERFACE" up
-		;;
-	3)
-		read -p "$(echo -e ${GREEN}"Enter MAC Address (XX:XX:XX:XX:XX:XX): "${NC})" new_mac
-		echo -e "${CYAN}[+] Setting MAC to $new_mac...${NC}"
-		sudo ip link set dev "$INTERFACE" down
-		sudo macchanger -m "$new_mac" "$INTERFACE"
-		sudo ip link set dev "$INTERFACE" up
-		;;
-	4)
-		echo -e "${GREEN}[+] Resetting to original MAC...${NC}"
-		sudo ip link set dev "$INTERFACE" down
-		sudo macchanger -p "$INTERFACE"
-		sudo ip link set dev "$INTERFACE" up
-		;;
-	5)
-		echo -e "${GREEN}[+] Current MAC address:${NC}"
-		sudo macchanger -s "$INTERFACE"
-		;;
-	*)
-		echo -e "${RED}[!]${NC}${CYAN} Invalid Choice!!${NC}"
-		;;
-esac
-
-echo  ""
-if [ "$choice" -ge 1 ] && [ "$choice" -le 4 ]; then
-	echo -e "${GREEN}[+] New Mac Address: ${NC}"
-	sudo macchanger -s "$INTERFACE" | grep "Current MAC"
-fi
-
-echo -e "${BOLD_YELLOW}Operation Completed!!${NC}"
-
+main
