@@ -1,0 +1,87 @@
+#!/bin/bash
+
+INTERFACE=$(ip route | grep default | awk '{print $5}' | head -n1)
+IP=$(ip -4 addr show "$INTERFACE" 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1)
+RED='\e[31m'
+GREEN='\e[32m'
+BOLD_YELLOW='\e[1;33m'
+CYAN='\e[36m'
+NC='\e[0m'
+
+if [ -z "$INTERFACE" ]; then
+	echo "No default interface found! Using first active interface..."
+	INTERFACE=$(ip -o -4 addr show | awk '{print $2}' | grep -v lo | head -n1)
+
+	if [-z "$INTERFACE" ]; then
+		echo "No network interfaces found!"
+		exit 1
+	fi
+fi
+
+clear
+echo -e  "${GREEN}======================================${NC}"
+echo -e  "${BOLD_YELLOW}         MaChanger: By QU73N   ${NC}"
+echo -e  "${GREEN}======================================${NC}"
+echo -e  "${CYAN}YOUR WIFI INTERFACE: ${INTERFACE}${NC}"
+echo -e  "${CYAN}YOUR DEFAULT IP: ${IP:- ${RED}No Ip Found}${NC}"
+echo  ""
+
+echo -e  "${BOLD_YELLOW}Select an options:${NC}"
+echo -e  "${GREEN}[1]${NC} Random MAC Address"
+echo -e  "${GREEN}[2]${NC} Random MAC (Same Vendor)"
+echo -e  "${GREEN}[3]${NC} Set Custom MAC Address"
+echo -e  "${GREEN}[4]${NC} Reset to Original MAC"
+echo -e  "${GREEN}[5]${NC} Show Current MAC"
+echo -e  "${GREEN}[0]${NC} Exit"
+echo  ""
+
+read -p "$(echo -e ${CYAN}"Enter your choice [1-5]: ${NC}")" choice
+
+case $choice in
+	0)
+		echo ""
+		echo -e "${RED}[+] Exiting...${NC}"
+		exit 0
+		;;
+	1)
+		echo -e "${GREEN}[+] Setting random MAC address...${NC}"
+		sudo ip link set dev "$INTERFACE" down
+		sudo macchanger -r "$INTERFACE"
+		sudo ip link set dev "$INTERFACE" up
+		;;
+	2)
+		echo -e "${GREEN}[+] Setting random MAC (Same Vendor)...${NC}"
+		sudo ip link set dev "$INTERFACE" down
+		sudo macchanger -a "$INTERFACE"
+		sudo ip link set dev "$INTERFACE" up
+		;;
+	3)
+		read -p "$(echo -e ${GREEN}"Enter MAC Address (XX:XX:XX:XX:XX:XX): "${NC})" new_mac
+		echo -e "${CYAN}[+] Setting MAC to $new_mac...${NC}"
+		sudo ip link set dev "$INTERFACE" down
+		sudo macchanger -m "$new_mac" "$INTERFACE"
+		sudo ip link set dev "$INTERFACE" up
+		;;
+	4)
+		echo -e "${GREEN}[+] Resetting to original MAC...${NC}"
+		sudo ip link set dev "$INTERFACE" down
+		sudo macchanger -p "$INTERFACE"
+		sudo ip link set dev "$INTERFACE" up
+		;;
+	5)
+		echo -e "${GREEN}[+] Current MAC address:${NC}"
+		sudo macchanger -s "$INTERFACE"
+		;;
+	*)
+		echo -e "${RED}[!]${NC}${CYAN} Invalid Choice!!${NC}"
+		;;
+esac
+
+echo  ""
+if [ "$choice" -ge 1 ] && [ "$choice" -le 4 ]; then
+	echo -e "${GREEN}[+] New Mac Address: ${NC}"
+	sudo macchanger -s "$INTERFACE" | grep "Current MAC"
+fi
+
+echo -e "${BOLD_YELLOW}Operation Completed!!${NC}"
+
